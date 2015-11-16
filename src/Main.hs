@@ -9,14 +9,24 @@ import           System.Environment (getArgs)
 
 -- massage the big string into a good dataset
 parse :: String -> M.Matrix Float
-parse = M.fromLists . map (map read . words) . lines
+parse =
+    M.fromLists . map (map read . words) . lines
+
+
+splitData :: M.Matrix Float -> (V.Vector Float, M.Matrix Float)
+splitData m =
+    ( M.getCol 1 m
+    , M.submatrix 1 (M.nrows m) 2 (M.ncols m) m
+    )
+
 
 main :: IO ()
 main = do
     [file] <- getArgs -- will crash if more than one file
-    raw <- T.readFile file
-    let dataset = parse (unpack raw)
-    print dataset
+    raw    <- T.readFile file
+    let (labels, features) =  splitData $ parse (unpack raw)
+    print labels
+    print features
 
 
 -- quick dataset access in repl
