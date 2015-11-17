@@ -20,3 +20,4 @@ executable features
                      , matrix <= 0.3.4.5
                      , vector
                      , text
+                     , mtl

@@ -1,12 +1,13 @@
 module Main where
-import           Control.Monad      (forM_)
-import qualified Data.Matrix        as M
-import           Data.Text          (unpack)
-import qualified Data.Text.IO       as T (readFile)
-import qualified Data.Vector        as V
-import           System.Environment (getArgs)
-import           System.IO          (hFlush, stdout)
-import Data.List ((\\))
+import           Control.Monad       (forM_, when)
+import           Control.Monad.State
+import           Data.List           ((\\))
+import qualified Data.Matrix         as M
+import           Data.Text           (unpack)
+import qualified Data.Text.IO        as T (readFile)
+import qualified Data.Vector         as V
+import           System.Environment  (getArgs)
+import           System.IO           (hFlush, stdout)
 
 -- massage the big string into a good dataset
 parse :: String -> M.Matrix Float
@@ -74,43 +75,39 @@ main = do
             ++ show (leaveOneOutCV [1.. M.ncols dataset] labels dataset)
             ++ "%\n"
     putStrLn "Beginning Search\n"
-    (accuracy, featureSet) <- algo `seq` algo labels dataset
+    (_, (_,_,accuracy,featureSet)) <- runStateT (algo labels dataset) (50,[],90,[11,11])
     putStrLn $ "Finished Search!! The best feature subset is "
             ++ show featureSet
             ++ ", which has an accuracy of "
             ++ show accuracy
             ++ "%"
 
--- take the labels and the dataset, produce and optimal set of features
--- labels and features stay in scope all the way down, haskell really is the best imperative language!
-forwardSelection :: V.Vector Float -> M.Matrix Float -> IO (Float,[Int])
-forwardSelection labels dataset = do
+-- TODO push all the state stuff into the body of forwardSelection
+forwardSelection :: V.Vector Float -> M.Matrix Float -> StateT (Float, [Int], Float, [Int]) IO ()
+forwardSelection labels dataset =
     forM_ [1.. M.ncols dataset] $ \i -> do
-        putStrLn $ "On the " ++ show i ++ "th level of the search tree"
-        forM_ [1.. M.ncols dataset] $ \k -> do
-            putStrLn $ "--Considering adding the " ++ show k ++ " feature"
-    return (0,[1,4,5])
+        (lastBestAcc, lastBestFeatures, bestAcc, bestFeatures) <- get
+        let featuresToAdd = [1.. M.ncols dataset] \\ lastBestFeatures
+        accSets <- forM featuresToAdd $ \k -> do
+                        let candidateSet = lastBestFeatures ++ [k]
+                            accuracy = leaveOneOutCV candidateSet labels dataset
+                        liftIO . putStrLn $ "       Using feature(s) "
+                                         ++ show candidateSet
+                                         ++ " accuracy is "
+                                         ++ show accuracy ++ "%"
+                        return (accuracy, candidateSet)
+        let (newAcc, newFeatures) = maximum accSets
+        liftIO $ putStrLn ""
+        when (newAcc < lastBestAcc) $ -- possible corner case when equal
+            liftIO $ putStrLn "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
+        liftIO . putStrLn $ "Feature set " ++ show newFeatures ++ " was best, accuracy " ++ show newAcc ++ "%\n"
+        put (newAcc, newFeatures, max newAcc bestAcc, max newFeatures bestFeatures)
 
--- [(The search depth i, max accuracy at that depth, set of features that got you that accuracy)]
--- [(The kth feature, accuracy, set of features that got you that accuracy)]
--- separate the computaion out from the pretty printing?
-
--- TODO Change return type to ((Float,[Int]),(Float,[Int])) to keep track of the best result for each level
--- Might have to canibalize this for parts to put into the imperative version above
-step :: (Float, [Int]) -- the previous best accuracy and feature set so far
-     -> V.Vector Float -- the labels
-     -> M.Matrix Float -- the Data
-     -> (Float, [Int]) -- the new best accuracy and feature set
-step (bestAcc,bestFeatures) labels dataset =
-    let featuresToConsider = [1..M.ncols dataset] \\ bestFeatures
-        candidateFeatureSets = map (flip (:) bestFeatures) featuresToConsider
-    in max (bestAcc,bestFeatures) $
-        maximum $ map (\features -> (leaveOneOutCV features labels dataset, features)) candidateFeatureSets
 
 leaveOneOutCV :: [Int] -> V.Vector Float -> M.Matrix Float -> Float
-leaveOneOutCV _ _ _ = 0
+leaveOneOutCV _ _ _ = 50
 
-backwardElimination :: V.Vector Float -> M.Matrix Float -> IO (Float,[Int])
+backwardElimination :: V.Vector Float -> M.Matrix Float -> StateT (Float,[Int],Float,[Int]) IO ()
 backwardElimination = undefined
 
 -- quick dataset access in repl
