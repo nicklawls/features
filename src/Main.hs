@@ -1,10 +1,13 @@
 module Main where
 import           Control.Monad       (forM_, when)
 import           Control.Monad.State
-import           Data.List           ((\\))
+import           Data.List           (foldl', foldl1', (\\))
+import           Data.Matrix         ((<->), (<|>))
 import qualified Data.Matrix         as M
+import           Data.Monoid         ((<>))
 import           Data.Text           (unpack)
 import qualified Data.Text.IO        as T (readFile)
+import           Data.Vector         ((!))
 import qualified Data.Vector         as V
 import           System.Environment  (getArgs)
 import           System.IO           (hFlush, stdout)
@@ -46,8 +49,10 @@ prompt = do
             algorithm <- getLine
             return (filename,algorithm)
 
+
 normalize :: M.Matrix Float -> M.Matrix Float
 normalize = id -- TODO Implement
+
 
 main :: IO ()
 main = do
@@ -75,37 +80,90 @@ main = do
             ++ show (leaveOneOutCV [1.. M.ncols dataset] labels dataset)
             ++ "%\n"
     putStrLn "Beginning Search\n"
-    (_, (_,_,accuracy,featureSet)) <- runStateT (algo labels dataset) (50,[],90,[11,11])
+    (_, (_,_,accuracy,featureSet)) <- runStateT (algo labels dataset) (50,[],50,[])
     putStrLn $ "Finished Search!! The best feature subset is "
             ++ show featureSet
             ++ ", which has an accuracy of "
             ++ show accuracy
             ++ "%"
 
--- TODO push all the state stuff into the body of forwardSelection
+
+leaveOneOutCV :: [Int]          -- features to consider]
+              -> V.Vector Float -- labels
+              -> M.Matrix Float -- dataset
+              -> Float          -- the percentage of computed labels that matched the true lable
+leaveOneOutCV features labels dataset =
+    let foo = score (uncurry permute (isolate (V.fromList features) labels dataset))
+    in  foldl' (\z (x,y) -> if x == y then z + 1 else 0) 0 foo / fromIntegral (length foo)
+
+
+isolate :: V.Vector Int -> V.Vector Float -> M.Matrix Float -> (V.Vector Float, M.Matrix Float)
+isolate cols labels dataset =
+     (V.map (labels !) cols , getCols cols dataset)
+
+
+getCols :: V.Vector Int -> M.Matrix a -> M.Matrix a
+getCols cols matrix =
+    if V.null cols then M.fromLists [[]]
+    else V.foldl1' (<|>) $ V.map (M.colVector . (`M.getCol` matrix)) cols
+
+
+permute :: V.Vector Float -> M.Matrix Float -> V.Vector (Float, V.Vector Float, M.Matrix Float)
+permute labels dataset =
+    let permutedMatricies :: V.Vector (M.Matrix Float)
+        permutedMatricies =
+            V.map (removeRow dataset) (V.enumFromTo 1 (M.nrows dataset))
+    in  V.zip3 labels (toRows dataset) permutedMatricies
+
+
+toRows :: M.Matrix a -> V.Vector (V.Vector a)
+toRows matrix =
+    V.map (`M.getRow` matrix) (V.enumFromTo 1 (M.nrows matrix))
+
+
+-- rowNum refers to the 1 based indexing of rows
+removeRow :: M.Matrix a -> Int -> M.Matrix a
+removeRow matrix rowNum =
+    V.foldl1' (<->) $
+        V.map M.rowVector
+            ( V.backpermute (toRows matrix) $
+              V.enumFromTo 0 (rowNum-2) <> V.enumFromTo rowNum (M.nrows matrix - 1)
+            )
+
+
+score :: V.Vector (Float, V.Vector Float, M.Matrix Float)  -> V.Vector (Float,Float)
+score =
+    V.map $ \(trueScore, example, training) -> (trueScore, nearestNeighbor example training)
+--compare the true label to the computed label
+
+
+--}
+
+nearestNeighbor :: V.Vector Float -> M.Matrix Float -> Float
+nearestNeighbor = undefined
+
+
 forwardSelection :: V.Vector Float -> M.Matrix Float -> StateT (Float, [Int], Float, [Int]) IO ()
 forwardSelection labels dataset =
     forM_ [1.. M.ncols dataset] $ \i -> do
         (lastBestAcc, lastBestFeatures, bestAcc, bestFeatures) <- get
-        let featuresToAdd = [1.. M.ncols dataset] \\ lastBestFeatures
+        let featuresToAdd = [1.. M.ncols dataset] \\ lastBestFeatures -- (\\) is set difference
         accSets <- forM featuresToAdd $ \k -> do
-                        let candidateSet = lastBestFeatures ++ [k]
-                            accuracy = leaveOneOutCV candidateSet labels dataset
-                        liftIO . putStrLn $ "       Using feature(s) "
-                                         ++ show candidateSet
-                                         ++ " accuracy is "
-                                         ++ show accuracy ++ "%"
-                        return (accuracy, candidateSet)
-        let (newAcc, newFeatures) = maximum accSets
-        liftIO $ putStrLn ""
+                    let candidateSet = lastBestFeatures ++ [k]
+                        accuracy = leaveOneOutCV candidateSet labels dataset
+                    putStrLnM ("       Using feature(s) " ++ show candidateSet ++ " accuracy is " ++ show accuracy ++ "%")
+                    return (accuracy, candidateSet)
+        let (newAcc, newFeatures) = maximum accSets -- maximum looks at left entry of tuple
+        putStrLnM  ""
         when (newAcc < lastBestAcc) $ -- possible corner case when equal
-            liftIO $ putStrLn "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
-        liftIO . putStrLn $ "Feature set " ++ show newFeatures ++ " was best, accuracy " ++ show newAcc ++ "%\n"
+            putStrLnM "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
+        putStrLnM ("Feature set " ++ show newFeatures ++ " was best, accuracy " ++ show newAcc ++ "%\n")
         put (newAcc, newFeatures, max newAcc bestAcc, max newFeatures bestFeatures)
 
+-- if I remember correctly, there was some ambiguity about which results to compare when you're continuing the search after a decrease
 
-leaveOneOutCV :: [Int] -> V.Vector Float -> M.Matrix Float -> Float
-leaveOneOutCV _ _ _ = 50
+
+
 
 backwardElimination :: V.Vector Float -> M.Matrix Float -> StateT (Float,[Int],Float,[Int]) IO ()
 backwardElimination = undefined
@@ -114,11 +172,18 @@ backwardElimination = undefined
 small34 :: IO String
 small34 = Prelude.readFile "data/cs_170_small34.txt"
 
+
 large34 :: IO String
 large34 = Prelude.readFile "data/cs_170_large34.txt"
+
 
 small80 :: IO String
 small80 = Prelude.readFile "data/cs_170_small80.txt"
 
+
 large80 :: IO String
 large80 = Prelude.readFile "data/cs_170_large34.txt"
+
+
+putStrLnM :: MonadIO m => String -> m ()
+putStrLnM = liftIO . putStrLn
