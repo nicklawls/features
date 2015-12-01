@@ -1,30 +1,30 @@
 module Main where
-import           Control.Monad       (forM_, when)
 import           Control.Monad.State
-import           Data.List           (foldl', foldl1', (\\))
+import           Data.List           (sortBy, (\\))
 import           Data.Matrix         ((<->), (<|>))
 import qualified Data.Matrix         as M
 import           Data.Monoid         ((<>))
-import           Data.Text           (unpack)
+import           Data.Text           (Text, unpack)
 import qualified Data.Text.IO        as T (readFile)
-import           Data.Vector         ((!))
 import qualified Data.Vector         as V
 import           System.Environment  (getArgs)
 import           System.IO           (hFlush, stdout)
+import           Statistics.Sample   (mean, stdDev)
+import           Data.Ord            (comparing)
+import           Safe                (headMay)
 
 -- massage the big string into a good dataset
-parse :: String -> M.Matrix Float
+parse :: String -> M.Matrix Double
 parse =
     M.fromLists . map (map read . words) . lines
 
 
-splitData :: M.Matrix Float -> (V.Vector Float, M.Matrix Float)
+splitData :: M.Matrix Double -> (V.Vector Double, M.Matrix Double)
 splitData m =
     ( M.getCol 1 m
     , M.submatrix 1 (M.nrows m) 2 (M.ncols m) m
     )
 
--- TODO if length args == 2, skip over prompt, else query user
 
 prompt :: IO (String, String) -- The filepath and the algorithm number
 prompt = do
@@ -50,8 +50,10 @@ prompt = do
             return (filename,algorithm)
 
 
-normalize :: M.Matrix Float -> M.Matrix Float
-normalize = id -- TODO Implement
+normalize :: M.Matrix Double -> M.Matrix Double
+normalize =
+    let normalizeCol col = V.map (\x -> (x - mean col) / stdDev col ) col
+    in V.foldl1' (<|>) . V.map (M.colVector . normalizeCol) . toCols
 
 
 main :: IO ()
@@ -67,8 +69,8 @@ main = do
           ++ " instances.\n"
     putStr "Please wait while I normalize the data... "
     hFlush stdout
-    let dataset = M.forceMatrix (normalize rawDataset) -- might have to use seq
-    putStrLn "Not Implemented!\n"
+    let dataset = M.forceMatrix (normalize rawDataset)
+    -- TODO put a "Done!" in the trace, or ya know, actually figure this out
     let algo = case algorithm of
                     "1" -> forwardSelection
                     "2" -> backwardElimination
@@ -88,37 +90,73 @@ main = do
             ++ "%"
 
 
-leaveOneOutCV :: [Int]          -- features to consider]
-              -> V.Vector Float -- labels
-              -> M.Matrix Float -- dataset
-              -> Float          -- the percentage of computed labels that matched the true lable
+leaveOneOutCV :: [Int]          -- features to consider
+              -> V.Vector Double -- labels
+              -> M.Matrix Double -- dataset
+              -> Double          -- the percentage of computed labels that matched the true lable
 leaveOneOutCV features labels dataset =
-    let foo = score (uncurry permute (isolate (V.fromList features) labels dataset))
-    in  foldl' (\z (x,y) -> if x == y then z + 1 else 0) 0 foo / fromIntegral (length foo)
+    let correctlyLabled = V.length
+                        $ V.filter (== True)
+                        $ V.zipWith (==) labels
+                        $ score labels (getCols (V.fromList features) dataset)
+    in 100 * (fromIntegral correctlyLabled / fromIntegral (M.nrows dataset))
 
 
-isolate :: V.Vector Int -> V.Vector Float -> M.Matrix Float -> (V.Vector Float, M.Matrix Float)
-isolate cols labels dataset =
-     (V.map (labels !) cols , getCols cols dataset)
 
-
+-- picks out the columns of 'matrix' specified by their 1 based indices in the array cols
 getCols :: V.Vector Int -> M.Matrix a -> M.Matrix a
 getCols cols matrix =
-    if V.null cols then M.fromLists [[]]
+    if   V.null cols then M.fromLists [[]]
     else V.foldl1' (<|>) $ V.map (M.colVector . (`M.getCol` matrix)) cols
 
 
-permute :: V.Vector Float -> M.Matrix Float -> V.Vector (Float, V.Vector Float, M.Matrix Float)
-permute labels dataset =
-    let permutedMatricies :: V.Vector (M.Matrix Float)
-        permutedMatricies =
-            V.map (removeRow dataset) (V.enumFromTo 1 (M.nrows dataset))
-    in  V.zip3 labels (toRows dataset) permutedMatricies
+score :: V.Vector Double -> M.Matrix Double -> V.Vector Double
+score labels dataset =
+    V.zipWith3 nearestNeighbor (leaveOneOutVec labels) (toRows dataset) (leaveOneOut dataset)
+
+
+leaveOneOutVec :: V.Vector a -> V.Vector (V.Vector a)
+leaveOneOutVec vec =
+    V.map (removeElement vec) (V.enumFromTo 0 (V.length vec - 1))
+
+
+-- 0 based indexing
+removeElement :: V.Vector a -> Int -> V.Vector a
+removeElement vec i =
+    let (top, bottom) = V.splitAt i vec
+    in  top <> V.slice 1 (V.length bottom - 1) bottom
+
+
+leaveOneOut :: M.Matrix a -> V.Vector (M.Matrix a)
+leaveOneOut matrix =
+    V.map (removeRow matrix) (V.enumFromTo 1 (M.nrows matrix))
+
+
+nearestNeighbor :: V.Vector Double -- the labels
+                -> V.Vector Double -- the example to be classified
+                -> M.Matrix Double -- the dataset
+                -> Double          -- the computed label
+nearestNeighbor labels example dataset =
+    maybe (error "catastrophic failure") fst $
+          headMay
+        $ sortBy (comparing snd)
+        $ V.toList
+        $ V.zip labels
+        $ V.map (euclidianDistance example) (toRows dataset)
+
+
+euclidianDistance :: Num a => V.Vector a -> V.Vector a -> a
+euclidianDistance v1 v2 =
+      V.sum (V.map (^(2 :: Integer)) (V.zipWith (-) v1 v2))
 
 
 toRows :: M.Matrix a -> V.Vector (V.Vector a)
 toRows matrix =
     V.map (`M.getRow` matrix) (V.enumFromTo 1 (M.nrows matrix))
+
+
+toCols :: M.Matrix a -> V.Vector (V.Vector a)
+toCols = toRows . M.transpose
 
 
 -- rowNum refers to the 1 based indexing of rows
@@ -131,21 +169,9 @@ removeRow matrix rowNum =
             )
 
 
-score :: V.Vector (Float, V.Vector Float, M.Matrix Float)  -> V.Vector (Float,Float)
-score =
-    V.map $ \(trueScore, example, training) -> (trueScore, nearestNeighbor example training)
---compare the true label to the computed label
-
-
---}
-
-nearestNeighbor :: V.Vector Float -> M.Matrix Float -> Float
-nearestNeighbor = undefined
-
-
-forwardSelection :: V.Vector Float -> M.Matrix Float -> StateT (Float, [Int], Float, [Int]) IO ()
+forwardSelection :: V.Vector Double -> M.Matrix Double -> StateT (Double, [Int], Double, [Int]) IO ()
 forwardSelection labels dataset =
-    forM_ [1.. M.ncols dataset] $ \i -> do
+    forM_ [1.. M.ncols dataset] $ \_ -> do
         (lastBestAcc, lastBestFeatures, bestAcc, bestFeatures) <- get
         let featuresToAdd = [1.. M.ncols dataset] \\ lastBestFeatures -- (\\) is set difference
         accSets <- forM featuresToAdd $ \k -> do
@@ -158,31 +184,31 @@ forwardSelection labels dataset =
         when (newAcc < lastBestAcc) $ -- possible corner case when equal
             putStrLnM "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
         putStrLnM ("Feature set " ++ show newFeatures ++ " was best, accuracy " ++ show newAcc ++ "%\n")
-        put (newAcc, newFeatures, max newAcc bestAcc, max newFeatures bestFeatures)
+        put (newAcc, newFeatures, max newAcc bestAcc, if newAcc > bestAcc then newFeatures else bestFeatures)
 
 -- if I remember correctly, there was some ambiguity about which results to compare when you're continuing the search after a decrease
 
 
 
 
-backwardElimination :: V.Vector Float -> M.Matrix Float -> StateT (Float,[Int],Float,[Int]) IO ()
+backwardElimination :: V.Vector Double -> M.Matrix Double -> StateT (Double,[Int],Double,[Int]) IO ()
 backwardElimination = undefined
 
 -- quick dataset access in repl
-small34 :: IO String
-small34 = Prelude.readFile "data/cs_170_small34.txt"
+small34 :: IO Text
+small34 = T.readFile "data/cs_170_small34.txt"
 
 
-large34 :: IO String
-large34 = Prelude.readFile "data/cs_170_large34.txt"
+large34 :: IO Text
+large34 = T.readFile "data/cs_170_large34.txt"
 
 
-small80 :: IO String
-small80 = Prelude.readFile "data/cs_170_small80.txt"
+small80 :: IO Text
+small80 = T.readFile "data/cs_170_small80.txt"
 
 
-large80 :: IO String
-large80 = Prelude.readFile "data/cs_170_large34.txt"
+large80 :: IO Text
+large80 = T.readFile "data/cs_170_large34.txt"
 
 
 putStrLnM :: MonadIO m => String -> m ()

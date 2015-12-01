@@ -1,1 +1,6 @@
 .stack-work/
+performance
+src/Main
+src/Main.hi
+src/Main.o
+src/*.stats
