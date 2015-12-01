@@ -1,6 +1,6 @@
 module Main where
 import           Control.Monad.State
-import           Data.List           (sortBy, (\\))
+import           Data.List           ((\\))
 import           Data.Matrix         ((<->), (<|>))
 import qualified Data.Matrix         as M
 import           Data.Monoid         ((<>))
@@ -11,7 +11,7 @@ import           System.Environment  (getArgs)
 import           System.IO           (hFlush, stdout)
 import           Statistics.Sample   (mean, stdDev)
 import           Data.Ord            (comparing)
-import           Safe                (headMay)
+
 
 -- massage the big string into a good dataset
 parse :: String -> M.Matrix Double

@@ -23,4 +23,3 @@ executable features
                      , text
                      , mtl
                      , statistics
-                     , safe
