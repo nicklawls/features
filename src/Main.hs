@@ -110,6 +110,8 @@ getCols cols matrix =
     else V.foldl1' (<|>) $ V.map (M.colVector . (`M.getCol` matrix)) cols
 
 
+-- TODO Intead of passing around a vector of matricies with the rows removed,
+-- iterate over a vector of vectors of indices to look at
 score :: V.Vector Double -> M.Matrix Double -> V.Vector Double
 score labels dataset =
     V.zipWith3 nearestNeighbor (leaveOneOutVec labels) (toRows dataset) (leaveOneOut dataset)
@@ -132,6 +134,19 @@ leaveOneOut matrix =
     V.map (removeRow matrix) (V.enumFromTo 1 (M.nrows matrix))
 
 
+-- rowNum refers to the 1 based indexing of rows
+removeRow :: M.Matrix a -> Int -> M.Matrix a
+removeRow matrix rowNum
+    | rowNum == 1              = rowsBelow
+    | rowNum == M.nrows matrix = rowsAbove
+    | otherwise                = rowsAbove <-> rowsBelow
+    where rowsAbove = M.submatrix 1 (rowNum - 1) 1 (M.ncols matrix) matrix
+          rowsBelow = M.submatrix (rowNum+1) (M.nrows matrix) 1 (M.ncols matrix) matrix
+
+
+
+
+
 nearestNeighbor :: V.Vector Double -- the labels
                 -> V.Vector Double -- the example to be classified
                 -> M.Matrix Double -- the dataset
@@ -147,7 +162,8 @@ nearestNeighbor labels example dataset =
 
 euclidianDistance :: Num a => V.Vector a -> V.Vector a -> a
 euclidianDistance v1 v2 =
-      V.sum (V.map (^(2 :: Integer)) (V.zipWith (-) v1 v2))
+      V.sum (V.map (^(2 :: Int)) (V.zipWith (-) v1 v2))
+
 
 
 toRows :: M.Matrix a -> V.Vector (V.Vector a)
@@ -159,14 +175,8 @@ toCols :: M.Matrix a -> V.Vector (V.Vector a)
 toCols = toRows . M.transpose
 
 
--- rowNum refers to the 1 based indexing of rows
-removeRow :: M.Matrix a -> Int -> M.Matrix a
-removeRow matrix rowNum =
-    V.foldl1' (<->) $
-        V.map M.rowVector
-            ( V.backpermute (toRows matrix) $
-              V.enumFromTo 0 (rowNum-2) <> V.enumFromTo rowNum (M.nrows matrix - 1)
-            )
+
+
 
 
 forwardSelection :: V.Vector Double -> M.Matrix Double -> StateT (Double, [Int], Double, [Int]) IO ()
