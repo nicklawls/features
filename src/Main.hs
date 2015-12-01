@@ -152,10 +152,8 @@ nearestNeighbor :: V.Vector Double -- the labels
                 -> M.Matrix Double -- the dataset
                 -> Double          -- the computed label
 nearestNeighbor labels example dataset =
-    maybe (error "catastrophic failure") fst $
-          headMay
-        $ sortBy (comparing snd)
-        $ V.toList
+          fst
+        $ V.minimumBy (comparing snd)
         $ V.zip labels
         $ V.map (euclidianDistance example) (toRows dataset)
 
