@@ -4,14 +4,13 @@ import           Data.List           ((\\))
 import           Data.Matrix         ((<->), (<|>))
 import qualified Data.Matrix         as M
 import           Data.Monoid         ((<>))
+import           Data.Ord            (comparing)
 import           Data.Text           (Text, unpack)
 import qualified Data.Text.IO        as T (readFile)
 import qualified Data.Vector         as V
+import           Statistics.Sample   (mean, stdDev)
 import           System.Environment  (getArgs)
 import           System.IO           (hFlush, stdout)
-import           Statistics.Sample   (mean, stdDev)
-import           Data.Ord            (comparing)
-
 
 -- massage the big string into a good dataset
 parse :: String -> M.Matrix Double
@@ -82,7 +81,7 @@ main = do
             ++ show (leaveOneOutCV [1.. M.ncols dataset] labels dataset)
             ++ "%\n"
     putStrLn "Beginning Search\n"
-    (_, (_,_,accuracy,featureSet)) <- runStateT (algo labels dataset) (50,[],50,[])
+    (accuracy,featureSet) <- algo labels dataset
     putStrLn $ "Finished Search!! The best feature subset is "
             ++ show featureSet
             ++ ", which has an accuracy of "
@@ -102,7 +101,6 @@ leaveOneOutCV features labels dataset =
     in 100 * (fromIntegral correctlyLabled / fromIntegral (M.nrows dataset))
 
 
-
 -- picks out the columns of 'matrix' specified by their 1 based indices in the array cols
 getCols :: V.Vector Int -> M.Matrix a -> M.Matrix a
 getCols cols matrix =
@@ -111,7 +109,7 @@ getCols cols matrix =
 
 
 -- TODO Intead of passing around a vector of matricies with the rows removed,
--- iterate over a vector of vectors of indices to look at
+-- iterate over a vector indices to carve out an example
 score :: V.Vector Double -> M.Matrix Double -> V.Vector Double
 score labels dataset =
     V.zipWith3 nearestNeighbor (leaveOneOutVec labels) (toRows dataset) (leaveOneOut dataset)
@@ -119,7 +117,7 @@ score labels dataset =
 
 leaveOneOutVec :: V.Vector a -> V.Vector (V.Vector a)
 leaveOneOutVec vec =
-    V.map (removeElement vec) (V.enumFromTo 0 (V.length vec - 1))
+    V.map (removeElement vec) (V.enumFromN 0 (V.length vec))
 
 
 -- 0 based indexing
@@ -131,7 +129,7 @@ removeElement vec i =
 
 leaveOneOut :: M.Matrix a -> V.Vector (M.Matrix a)
 leaveOneOut matrix =
-    V.map (removeRow matrix) (V.enumFromTo 1 (M.nrows matrix))
+    V.map (removeRow matrix) (V.enumFromN 1 (M.nrows matrix))
 
 
 -- rowNum refers to the 1 based indexing of rows
@@ -142,9 +140,6 @@ removeRow matrix rowNum
     | otherwise                = rowsAbove <-> rowsBelow
     where rowsAbove = M.submatrix 1 (rowNum - 1) 1 (M.ncols matrix) matrix
           rowsBelow = M.submatrix (rowNum+1) (M.nrows matrix) 1 (M.ncols matrix) matrix
-
-
-
 
 
 nearestNeighbor :: V.Vector Double -- the labels
@@ -166,41 +161,62 @@ euclidianDistance v1 v2 =
 
 toRows :: M.Matrix a -> V.Vector (V.Vector a)
 toRows matrix =
-    V.map (`M.getRow` matrix) (V.enumFromTo 1 (M.nrows matrix))
+    V.map (`M.getRow` matrix) (V.enumFromN 1 (M.nrows matrix))
+
 
 
 toCols :: M.Matrix a -> V.Vector (V.Vector a)
 toCols = toRows . M.transpose
 
+{- It turns out that the vast majority of the code for the forward and backward
+   searches is essentially the same. We can reuse the main "featureSearch" section
+   by abstracting out a function to choose which features are examined in the
+   inner loop, another function to determine whether we add or remove a feature
+   on each iteration, and the inital set of features.
+-}
+
+featureSearch :: ([Int] -> [Int] -> [Int]) -- how to choose which features to consider
+              -> ([Int] -> [Int] -> [Int]) -- how to add the next feature
+              -> [Int]                     -- starting features
+              -> V.Vector Double
+              -> M.Matrix Double
+              -> IO (Double, [Int])
+featureSearch choose add initial labels dataset = do
+    (_,(_,_,acc,features)) <- runStateT computeFeatures (50,initial,50,initial)
+    return (acc,features)
+    where
+        -- Haskell forces us to be clear about our intention to use 4 mutable variables,
+        -- even then, its only a functional simulation of mutable state
+        computeFeatures :: StateT (Double, [Int], Double, [Int]) IO ()
+        computeFeatures =
+            forM_ [1.. M.ncols dataset] $ \_ -> do
+                (lastBestAcc, lastBestFeatures, bestAcc, bestFeatures) <- get
+                let featuresToConsider = [1.. M.ncols dataset] `choose` lastBestFeatures
+                accSets <- forM featuresToConsider $ \k -> do
+                            let candidateSet = lastBestFeatures `add` [k]
+                                (accuracy,set) = case candidateSet of
+                                                [] -> (leaveOneOutCV [1..M.ncols dataset] labels dataset,[1..M.ncols dataset])
+                                                _  -> (leaveOneOutCV candidateSet labels dataset,candidateSet)
+                            putStrLnM ("       Using feature(s) " ++ show set ++ " accuracy is " ++ show accuracy ++ "%")
+                            return (accuracy, set)
+                let (newAcc, newFeatures) = maximum accSets -- maximum looks at left entry of tuple
+                putStrLnM  ""
+                when (newAcc < lastBestAcc) $ -- possible corner case when equal
+                    putStrLnM "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
+                putStrLnM ("Feature set " ++ show newFeatures ++ " was best, accuracy " ++ show newAcc ++ "%\n")
+                put (newAcc, newFeatures, max newAcc bestAcc, if newAcc > bestAcc then newFeatures else bestFeatures)
 
 
+-- too choose the features considered, we remove the ones we've already looked at
+forwardSelection :: V.Vector Double -> M.Matrix Double -> IO (Double, [Int])
+forwardSelection = featureSearch (\\) (++) []
+
+-- we're only interested in the features that are left after the last iteration
+-- so we use `seq`, which always returns its second argument.
+backwardElimination :: V.Vector Double -> M.Matrix Double -> IO (Double,[Int])
+backwardElimination labels dataset = featureSearch seq (\\) [1..M.ncols dataset] labels dataset
 
 
-
-forwardSelection :: V.Vector Double -> M.Matrix Double -> StateT (Double, [Int], Double, [Int]) IO ()
-forwardSelection labels dataset =
-    forM_ [1.. M.ncols dataset] $ \_ -> do
-        (lastBestAcc, lastBestFeatures, bestAcc, bestFeatures) <- get
-        let featuresToAdd = [1.. M.ncols dataset] \\ lastBestFeatures -- (\\) is set difference
-        accSets <- forM featuresToAdd $ \k -> do
-                    let candidateSet = lastBestFeatures ++ [k]
-                        accuracy = leaveOneOutCV candidateSet labels dataset
-                    putStrLnM ("       Using feature(s) " ++ show candidateSet ++ " accuracy is " ++ show accuracy ++ "%")
-                    return (accuracy, candidateSet)
-        let (newAcc, newFeatures) = maximum accSets -- maximum looks at left entry of tuple
-        putStrLnM  ""
-        when (newAcc < lastBestAcc) $ -- possible corner case when equal
-            putStrLnM "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
-        putStrLnM ("Feature set " ++ show newFeatures ++ " was best, accuracy " ++ show newAcc ++ "%\n")
-        put (newAcc, newFeatures, max newAcc bestAcc, if newAcc > bestAcc then newFeatures else bestFeatures)
-
--- if I remember correctly, there was some ambiguity about which results to compare when you're continuing the search after a decrease
-
-
-
-
-backwardElimination :: V.Vector Double -> M.Matrix Double -> StateT (Double,[Int],Double,[Int]) IO ()
-backwardElimination = undefined
 
 -- quick dataset access in repl
 small34 :: IO Text
