@@ -1,6 +1,6 @@
 module Main where
 import           Control.Monad.State
-import           Data.List           ((\\))
+import           Data.List           ((\\),sortBy)
 import           Data.Matrix         ((<->), (<|>))
 import qualified Data.Matrix         as M
 import           Data.Monoid         ((<>))
@@ -11,6 +11,8 @@ import qualified Data.Vector         as V
 import           Statistics.Sample   (mean, stdDev)
 import           System.Environment  (getArgs)
 import           System.IO           (hFlush, stdout)
+import           Data.Random         (shuffleNofM, sampleState)
+import           System.Random       (mkStdGen)
 
 -- massage the big string into a good dataset
 parse :: String -> M.Matrix Double
@@ -69,11 +71,11 @@ main = do
     putStr "Please wait while I normalize the data... "
     hFlush stdout
     let dataset = M.forceMatrix (normalize rawDataset)
-    -- TODO put a "Done!" in the trace, or ya know, actually figure this out
+    putStrLn "Done!"
     let algo = case algorithm of
                     "1" -> forwardSelection
                     "2" -> backwardElimination
-                    "3" -> error "Extra algorithm not implemented"
+                    "3" -> specialAlgorithm
                     _ -> error "Choose a proper algorithm!"
     putStrLn $ "Running nearest neighbor with all "
             ++ show (M.ncols dataset)
@@ -89,7 +91,7 @@ main = do
             ++ "%"
 
 
-leaveOneOutCV :: [Int]          -- features to consider
+leaveOneOutCV :: [Int]           -- features to consider
               -> V.Vector Double -- labels
               -> M.Matrix Double -- dataset
               -> Double          -- the percentage of computed labels that matched the true lable
@@ -182,10 +184,10 @@ featureSearch :: ([Int] -> [Int] -> [Int]) -- how to choose which features to co
               -> M.Matrix Double
               -> IO (Double, [Int])
 featureSearch choose add initial labels dataset = do
-    (_,(_,_,acc,features)) <- runStateT computeFeatures (50,initial,50,initial)
+    (_,_,acc,features) <- execStateT computeFeatures (50,initial,50,initial)
     return (acc,features)
     where
-        -- Haskell forces us to be clear about our intention to use 4 mutable variables,
+        -- Haskell forces us to be clear about our intention to use 4 mutable variables
         -- even then, its only a functional simulation of mutable state
         computeFeatures :: StateT (Double, [Int], Double, [Int]) IO ()
         computeFeatures =
@@ -207,7 +209,7 @@ featureSearch choose add initial labels dataset = do
                 put (newAcc, newFeatures, max newAcc bestAcc, if newAcc > bestAcc then newFeatures else bestFeatures)
 
 
--- too choose the features considered, we remove the ones we've already looked at
+-- to choose the features considered, we remove the ones we've already looked at
 forwardSelection :: V.Vector Double -> M.Matrix Double -> IO (Double, [Int])
 forwardSelection = featureSearch (\\) (++) []
 
@@ -215,6 +217,51 @@ forwardSelection = featureSearch (\\) (++) []
 -- so we use `seq`, which always returns its second argument.
 backwardElimination :: V.Vector Double -> M.Matrix Double -> IO (Double,[Int])
 backwardElimination labels dataset = featureSearch seq (\\) [1..M.ncols dataset] labels dataset
+
+{- in each inner loop, try out the top 3-5 scoring subsets on the full dataset
+   pick the one with the highest score and maintain that score going forward
+-}
+specialAlgorithm :: V.Vector Double -> M.Matrix Double -> IO (Double,[Int])
+specialAlgorithm labels dataset = do
+    putStrLn "Taking a random sample of the original dataset"
+    let sampleSize = M.nrows dataset `div` 10
+    (_,_,acc,features) <- execStateT  (uncurry computeFeatures (randomSample sampleSize labels dataset)) (50,[],50,[])
+    return (acc,features)
+    where
+        computeFeatures :: V.Vector Double -> M.Matrix Double -> StateT (Double, [Int], Double, [Int]) IO ()
+        computeFeatures labels' dataset' =
+            forM_ [1.. M.ncols dataset'] $ \_ -> do
+                (lastBestAcc, lastBestFeatures, bestAcc, bestFeatures) <- get
+                let featuresToConsider = [1.. M.ncols dataset'] \\ lastBestFeatures
+                accSets <- forM featuresToConsider $ \k -> do
+                            let candidateSet = lastBestFeatures ++ [k]
+                                (accuracy,set) = case candidateSet of
+                                                [] -> (leaveOneOutCV [1..M.ncols dataset'] labels' dataset',[1..M.ncols dataset'])
+                                                _  -> (leaveOneOutCV candidateSet labels' dataset',candidateSet)
+                            putStrLnM ("       Using feature(s) " ++ show set ++ " accuracy is " ++ show accuracy ++ "%")
+                            return (accuracy, set)
+                -- compute the score of the top X feature subsets, take the best
+                let accSets' = topNOnFullDataset 3 labels dataset accSets
+                    (newAcc, newFeatures) = maximum accSets' -- maximum looks at left entry of tuple
+                putStrLnM  ""
+                when (newAcc < lastBestAcc) $ -- possible corner case when equal
+                    putStrLnM "(Warning, Accuracy has decreased! Continuing search in case of local maxima)"
+                putStrLnM ("Feature set " ++ show newFeatures ++ " was best, full dataset accuracy " ++ show newAcc ++ "%\n")
+                put (newAcc, newFeatures, max newAcc bestAcc, if newAcc > bestAcc then newFeatures else bestFeatures)
+
+
+topNOnFullDataset :: Int -> V.Vector Double -> M.Matrix Double -> [(Double,[Int])] -> [(Double,[Int])]
+topNOnFullDataset n labels dataset =
+    let scoreWithFeatures :: V.Vector Double -> M.Matrix Double -> (Double,[Int]) -> (Double,[Int])
+        scoreWithFeatures labels' dataset' (_,features) = (leaveOneOutCV features labels' dataset', features)
+    in map (scoreWithFeatures labels dataset) . take n . sortBy (flip compare)
+
+
+randomSample :: Int -> V.Vector Double -> M.Matrix Double -> (V.Vector Double, M.Matrix Double)
+randomSample n labels dataset =
+    let (labels',dataset') = unzip . fst $ sampleState (shuffleNofM n (M.nrows dataset) (zip (V.toList labels) (M.toLists dataset))) (mkStdGen 366)
+    in (V.fromList labels', M.fromLists dataset')
+
 
 
 
@@ -235,5 +282,6 @@ large80 :: IO Text
 large80 = T.readFile "data/cs_170_large34.txt"
 
 
+-- easy printing in IO Monads
 putStrLnM :: MonadIO m => String -> m ()
 putStrLnM = liftIO . putStrLn
